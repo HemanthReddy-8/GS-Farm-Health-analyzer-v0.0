@@ -8,7 +8,7 @@ from PIL import Image
 @st.cache_resource
 def load_primary_clip_model():
     """
-    Loads the ViT-L/14 CLIP model and preprocess function.
+    Loads the ViT-B/32 CLIP model and preprocess function.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading Primary CLIP Model (ViT-B/32) on {device}...")

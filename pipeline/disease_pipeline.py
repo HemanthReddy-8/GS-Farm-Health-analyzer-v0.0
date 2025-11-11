@@ -2,11 +2,11 @@ import streamlit as st
 from PIL import Image
 import numpy as np
 import cv2
-from transformers import AutoImageProcessor, AutoModel,pipeline
-# --- UPDATED IMPORTS ---
-from sklearn.cluster import KMeans  # Replaced DBSCAN
+from transformers import AutoImageProcessor, AutoModel
+from sklearn.cluster import KMeans 
 from collections import defaultdict
 import torch
+import clip  
 
 # --- Import your new BG remover function ---
 try:
@@ -47,8 +47,7 @@ def load_dino_model():
         print(f"Error loading DINOv2 model: {e}")
         return None, None, None
 
-# ---
-# --- MODIFIED: run_crop_classification (Using KMeans)
+# ---run_crop_classification (Using KMeans)
 # ---
 def run_crop_classification(image_batch, model, processor, device, num_clusters=3):
     """
@@ -99,54 +98,57 @@ def run_crop_classification(image_batch, model, processor, device, num_clusters=
     return final_groups
 
 
-@st.cache_resource
-def load_clip_classifier():
+def run_health_classification(crop_name, image_group, model, preprocess, device):
     """
-    Loads a pre-trained CLIP model from the Hugging Face Hub.
+    Classifies a batch of images as 'healthy' or 'unhealthy' using the passed CLIP model.
     """
-    try:
-        model_id = "openai/clip-vit-base-patch32" 
-        
-        print(f"Loading CLIP model from Hugging Face Hub: {model_id}...")
-        
-        # Determine device
-        device = 0 if torch.cuda.is_available() else -1 # 0 for GPU, -1 for CPU
-        
-        classifier = pipeline(
-            task="zero-shot-image-classification", 
-            model=model_id,
-            device=device # Tell the pipeline to use the GPU if available
-        )
-        
-        print("CLIP model loaded successfully from the Hub.")
-        return classifier
-        
-    except Exception as e:
-        st.error(f"Error loading CLIP model from Hugging Face Hub: {e}")
-        return None
-    
-def run_health_classification(crop_name, image_group, classifier):
-    if not image_group or classifier is None:
+    if not image_group or model is None:
         return {"healthy": [], "unhealthy": []}
     
-    candidate_labels = ["healthy leaf", "unhealthy leaf with disease, spots, or pests"]
+    # --- Define new prompts for this classifier ---
+    candidate_labels = [
+        "a photo of a healthy plant leaf",
+        "a photo of a sick plant leaf with disease, spots, or damage"
+    ]
+    health_text_tokens = clip.tokenize(candidate_labels).to(device)
+    
+    with torch.no_grad():
+        health_text_features = model.encode_text(health_text_tokens)
+        health_text_features /= health_text_features.norm(dim=-1, keepdim=True)
+
     health_results = {"healthy": [], "unhealthy": []}
     
-    pil_images = [img for _, img in image_group]
-    classifications = classifier(pil_images, candidate_labels=candidate_labels)
-    
-    for i, classification in enumerate(classifications):
-        best_score = classification[0]
-        if best_score['label'] == 'healthy leaf':
-            health_results["healthy"].append(image_group[i])
+    for filename, pil_image in image_group:
+        
+        # --- Preprocess the image ---
+        # Ensure image is 3-channel RGB for CLIP
+        if pil_image.mode == "RGBA":
+            white_bg = Image.new("RGB", pil_image.size, (255, 255, 255))
+            white_bg.paste(pil_image, (0, 0), pil_image)
+            image_rgb = white_bg
         else:
-            health_results["unhealthy"].append(image_group[i])
+            image_rgb = pil_image.convert("RGB")
+        
+        processed_image = preprocess(image_rgb).unsqueeze(0).to(device)
+        
+        # --- Score the image ---
+        with torch.no_grad():
+            image_features = model.encode_image(processed_image)
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+            
+            # Compare image to "healthy" and "unhealthy" prompts
+            scores = (image_features @ health_text_features.T).softmax(dim=-1)
+            healthy_score = scores[0][0].item()
+            unhealthy_score = scores[0][1].item()
+            
+        if healthy_score > unhealthy_score:
+            health_results["healthy"].append((filename, pil_image))
+        else:
+            health_results["unhealthy"].append((filename, pil_image))
             
     return health_results
 
-# ---
-# --- THIS IS THE UPDATED FUNCTION ---
-# ---
+
 def run_disease_classification(crop_name, unhealthy_images, model, processor, device, num_clusters=3):
     """
     Classifies unhealthy images into a fixed number of disease clusters using KMeans.
@@ -167,8 +169,7 @@ def run_disease_classification(crop_name, unhealthy_images, model, processor, de
     grouped_by_id = defaultdict(list)
 
     if not features:
-        # No features, but we still return the empty structure
-        pass # grouped_by_id is already an empty defaultdict
+        pass 
 
     else:
         features_array = np.array(features)
@@ -189,10 +190,6 @@ def run_disease_classification(crop_name, unhealthy_images, model, processor, de
             for i, label in enumerate(labels):
                 grouped_by_id[label].append(unhealthy_images[i])
 
-    # --- This is the key change ---
-    # ALWAYS create all three keys, pulling from the grouped_by_id dict.
-    # If a key (e.g., 1) doesn't exist in grouped_by_id, .get() will return 
-    # the default value (an empty list).
     final_disease_groups = {
         f"{crop_name} Disease A": grouped_by_id.get(0, []),
         f"{crop_name} Disease B": grouped_by_id.get(1, []),
@@ -203,11 +200,10 @@ def run_disease_classification(crop_name, unhealthy_images, model, processor, de
     return final_disease_groups
 
 
-def run_disease_pipeline_by_crop(crop_groups, dino_model, dino_processor, dino_device, clip_classifier, global_bg_removed: bool = False):
-    """
-    Runs the full pipeline and returns a new data structure:
-    (image_data_list, aggregated_palette)
-    """
+def run_disease_pipeline_by_crop(crop_groups, 
+                                 dino_model, dino_processor, dino_device, 
+                                 clip_model, clip_preprocess, clip_device,  
+                                 global_bg_removed: bool = False):
     try:
         final_sorting_results = {}
         
@@ -219,20 +215,26 @@ def run_disease_pipeline_by_crop(crop_groups, dino_model, dino_processor, dino_d
                 }
                 continue
             
+            # --- THIS FUNCTION CALL IS MODIFIED ---
             # 1. Health/Disease Sorting
-            health_results = run_health_classification(crop_name, image_group, clip_classifier)
+            health_results = run_health_classification(
+                crop_name, 
+                image_group, 
+                clip_model,      # <-- Pass the model
+                clip_preprocess, # <-- Pass the preprocess
+                clip_device      # <-- Pass the device
+            )
             healthy_images = health_results["healthy"]
             unhealthy_images = health_results["unhealthy"]
 
             # 2. Process HEALTHY images
             healthy_aggregated_palette = None
-            healthy_image_data = [] # <-- This will be the list of dicts
+            healthy_image_data = [] 
             all_healthy_bg_removed_bgr = [] # For aggregated palette
 
             if healthy_images:
                 for fname, img_pil in healthy_images:
                     
-                    # --- THIS IS THE FIX (Block 1) ---
                     if global_bg_removed:
                         # 1. Convert PIL RGBA to 4-channel numpy array
                         rgba_np = np.array(img_pil.convert("RGBA"))
@@ -251,7 +253,7 @@ def run_disease_pipeline_by_crop(crop_groups, dino_model, dino_processor, dino_d
                         # 5. Blend
                         bgr_img = (bgr * alpha_mask + bg * (1 - alpha_mask)).astype(np.uint8)
                     else:
-                        # Not yet removed. Run the internal remover (this already returns BGR-on-white)
+                        # Not yet removed. Run the internal remover 
                         bgr_img = remove_bg_from_pil_and_get_bgr(img_pil)
 
                     all_healthy_bg_removed_bgr.append((fname, bgr_img))
@@ -273,7 +275,6 @@ def run_disease_pipeline_by_crop(crop_groups, dino_model, dino_processor, dino_d
             # 3. Process UNHEALTHY images
             disease_groups_with_palettes = {}
             if unhealthy_images:
-                # --- THIS CALL IS NOW UPDATED ---
                 # It calls the new KMeans-based function.
                 disease_groups_raw = run_disease_classification(
                     crop_name, unhealthy_images, dino_model, dino_processor, dino_device
@@ -281,13 +282,13 @@ def run_disease_pipeline_by_crop(crop_groups, dino_model, dino_processor, dino_d
                 
                 for disease_name, disease_image_group in disease_groups_raw.items():
                     aggregated_palette = None
-                    image_data_list = [] # <-- This will be the list of dicts
+                    image_data_list = [] 
                     all_disease_bg_removed_bgr = [] # For aggregated palette
 
                     if disease_image_group:
                         for fname, img_pil in disease_image_group:
                             
-                            # --- THIS IS THE FIX (Block 2) ---
+                            
                             if global_bg_removed:
                                 # 1. Convert PIL RGBA to 4-channel numpy array
                                 rgba_np = np.array(img_pil.convert("RGBA"))
@@ -330,7 +331,6 @@ def run_disease_pipeline_by_crop(crop_groups, dino_model, dino_processor, dino_d
             
             # 4. Store all results
             final_sorting_results[crop_name] = {
-                # **THIS IS THE FIX**: Return the new data structure
                 "healthy": (healthy_image_data, healthy_aggregated_palette),
                 "unhealthy_by_disease": disease_groups_with_palettes
             }
