@@ -16,3 +16,4 @@ transformers
 openai-clip
 supervision
 numpy
+scikit-image

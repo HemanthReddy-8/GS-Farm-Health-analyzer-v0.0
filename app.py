@@ -18,7 +18,7 @@ from pipeline.pest_pipeline import (
 from pipeline.disease_pipeline import (
     load_dino_model,
     run_crop_classification,
-    load_clip_classifier,
+    # load_clip_classifier, <-- THIS IS REMOVED
     run_health_classification,
     run_disease_classification,
     run_disease_pipeline_by_crop
@@ -50,18 +50,21 @@ def run_pest_pipeline_wrapper(crop_groups, model):
     except Exception as e:
         return None, f"Error in Pest Pipeline: {e}"
 
-# --- MODIFIED: Wrapper now accepts the global_bg_removed flag ---
-def run_disease_pipeline_wrapper(crop_groups, dino_model, dino_processor, dino_device, clip_classifier, global_bg_removed):
+# --- MODIFIED: Wrapper now accepts the main CLIP model ---
+def run_disease_pipeline_wrapper(crop_groups, 
+                                 dino_model, dino_processor, dino_device, 
+                                 clip_model, clip_preprocess, clip_device, # <-- Arguments changed
+                                 global_bg_removed):
     """Wrapper for the disease pipeline."""
     try:
-        # Pass the flag to the actual pipeline function
+        # Pass the flag and the CLIP model
         disease_results = run_disease_pipeline_by_crop(
             crop_groups, 
             dino_model, 
             dino_processor, 
             dino_device, 
-            clip_classifier, 
-            global_bg_removed  # <-- Pass the flag here
+            clip_model, clip_preprocess, clip_device, # <-- Pass them here
+            global_bg_removed
         )
         return disease_results
     except Exception as e:
@@ -190,13 +193,16 @@ if uploaded_files:
             # Load all models
             pest_model = load_pest_model()
             dino_model, dino_processor, dino_device = load_dino_model()
-            clip_classifier = load_clip_classifier() # This is the *health* classifier
             
-            # --- NEW: Load Primary CLIP Model ---
+            # --- THIS IS THE CHANGE ---
+            # Load ONE CLIP model for both tasks
             primary_clip_model, primary_preprocess, primary_device = load_primary_clip_model()
+            
+            # Load text prompts for the *primary* classifier
             pest_text_features, disease_text_features = get_primary_clip_features(primary_clip_model)
+            # --- END OF CHANGE ---
 
-        if not all([pest_model, dino_model, clip_classifier, primary_clip_model]):
+        if not all([pest_model, dino_model, primary_clip_model]): # <-- CHANGED
             st.error("One or more models failed to load. Cannot proceed.")
         else:
             
@@ -266,7 +272,6 @@ if uploaded_files:
                 pest_batch_for_pipeline = processed_pest_batch
                 disease_batch_for_pipeline = processed_disease_batch
             
-            # --- THIS IS THE CHANGE (Step 3) ---
             # Create a combined batch for the disease pipeline
             all_images_for_pipeline = pest_batch_for_pipeline + disease_batch_for_pipeline
             
@@ -285,7 +290,7 @@ if uploaded_files:
                     # Submit Pest pipeline with *only* pest crop groups
                     pest_future = executor.submit(run_pest_pipeline_wrapper, pest_crop_groups, pest_model)
                     
-                    # --- THIS IS THE CHANGE (Step 4) ---
+                    # --- THIS IS THE CHANGE ---
                     # Submit Disease pipeline with ALL crop groups
                     disease_future = executor.submit(
                         run_disease_pipeline_wrapper, 
@@ -293,9 +298,12 @@ if uploaded_files:
                         dino_model, 
                         dino_processor, 
                         dino_device, 
-                        clip_classifier,
+                        primary_clip_model,  # <-- Pass the one CLIP model
+                        primary_preprocess,  # <-- Pass its processor
+                        primary_device,      # <-- Pass its device
                         global_bg_remove_enabled # Pass flag for internal BG logic
                     )
+                    # --- END OF CHANGE ---
                     
                     pest_result = pest_future.result()
                     disease_result = disease_future.result()
