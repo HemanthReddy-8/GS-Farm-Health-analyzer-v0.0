@@ -19,7 +19,7 @@ def load_pest_model():
     Caches it in Streamlit's resource cache.
     """
     try:
-        model = YOLO("models/best.pt") # Assumes 'models/best.pt'
+        model = YOLO("models/best.pt")
         return model
     except Exception as e:
         st.error(f"Error loading pest model: {e}")

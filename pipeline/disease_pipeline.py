@@ -6,7 +6,8 @@ from transformers import AutoImageProcessor, AutoModel
 from sklearn.cluster import KMeans 
 from collections import defaultdict
 import torch
-import clip  
+import torch.nn as nn
+import clip 
 
 # --- Import your new BG remover function ---
 try:
@@ -32,75 +33,147 @@ except ImportError:
         cv2.putText(palette, "Individual Color Analysis Failed", (30, 128), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
         return cv2.cvtColor(palette, cv2.COLOR_BGR2RGB)
 
+# =======================================================================
+# 1. NEW: CLASS DEFINITIONS (Added)
+# =======================================================================
+
+# Make sure the order matches your training!
+CROP_CLASSES = ["tomato", "sunflower", "potato", "okra"]
+
+class CustomDinoClassifier(nn.Module):
+    """
+    Blueprint for the fine-tuned 4-class CROP classifier.
+    This version includes the intermediate 'fc1' layer.
+    """
+    def __init__(self, num_classes=4):
+        super(CustomDinoClassifier, self).__init__()
+        # 1. The DINO backbone (loads pre-trained weights)
+        self.dino = AutoModel.from_pretrained("facebook/dinov2-small")
+        
+        # 2. The classification head (matches your .pth file)
+        self.fc1 = nn.Linear(384, 512) # DINO output (384) -> Intermediate (512)
+        self.classifier = nn.Linear(512, num_classes) # Intermediate (512) -> Output (4)
+        self.relu = nn.ReLU()
+
+    def forward(self, pixel_values):
+        # Pass through DINO backbone
+        outputs = self.dino(pixel_values=pixel_values)
+        cls_token = outputs.last_hidden_state[:, 0]
+        
+        # Pass through the two-layer head
+        x = self.relu(self.fc1(cls_token))
+        logits = self.classifier(x)
+        return logits
+
+# =======================================================================
+# 2. NEW: MODEL LOADING FUNCTIONS (Replaced old load_dino_model)
+# =======================================================================
 
 @st.cache_resource
-def load_dino_model():
+def load_dino_processor():
+    """
+    Loads and caches the SHARED DINOv2 image processor.
+    """
     try:
         processor = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
+        print("[INFO] DINOv2 processor loaded successfully.")
+        return processor
+    except Exception as e:
+        print(f"Error loading DINOv2 processor: {e}")
+        return None
+
+@st.cache_resource
+def load_base_dino_model():
+    """
+    Loads the RAW DINOv2 model (for disease clustering).
+    """
+    try:
         model = AutoModel.from_pretrained("facebook/dinov2-small")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
-        print(f"[INFO] Loading DINOv2 (facebook/dinov2-small) on {device}...")
-        print("[INFO] DINOv2 model loaded successfully.")
-        return model, processor, device
+        model.eval() # Set to eval mode
+        print(f"[INFO] Loading BASE DINOv2 (facebook/dinov2-small) on {device}...")
+        print("[INFO] BASE DINOv2 model loaded successfully.")
+        return model, device
     except Exception as e:
-        print(f"Error loading DINOv2 model: {e}")
-        return None, None, None
+        print(f"Error loading BASE DINOv2 model: {e}")
+        return None, None
 
-# ---run_crop_classification (Using KMeans)
-# ---
-def run_crop_classification(image_batch, model, processor, device, num_clusters=3):
+@st.cache_resource
+def load_crop_classifier():
     """
-    Classifies images into a fixed number of crop clusters using KMeans.
+    Loads the FINE-TUNED 4-class CROP classifier.
+    """
+    try:
+        weights_path = "models/best_head_weights.pth"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # 1. Instantiate the *correct* model structure
+        model = CustomDinoClassifier(num_classes=len(CROP_CLASSES))
+        
+        # 2. Load the weights dictionary (contains ONLY fc1 and classifier)
+        weights_dict = torch.load(weights_path, map_location=device)
+        
+        # --- START OF THE FIX ---
+        # 3. Load the weights into the model.
+        # strict=False tells PyTorch to NOT error out if keys are missing.
+        # This will load 'fc1.weight', 'classifier.weight', etc.
+        # and happily ignore that 'dino.embeddings.cls_token' is missing.
+        model.load_state_dict(weights_dict, strict=False) 
+        # --- END OF THE FIX ---
+        
+        # 4. Send to device and set to eval mode
+        model.to(device)
+        model.eval()
+        
+        print(f"[INFO] 4-class CROP classifier loaded successfully on {device}.")
+        return model, device
+        
+    except Exception as e:
+        print(f"Error loading CROP classifier: {e}")
+        return None, None
+# =======================================================================
+# 3. CROP CLASSIFICATION (Replaced KMeans with Supervised Model)
+# =======================================================================
+
+def run_crop_classification(image_batch, model, processor, device):
+    """
+    Classifies images into named crop clusters using the fine-tuned
+    4-class DINO model.
     """
     if not image_batch or model is None or processor is None:
         return {}
     
-    features = []
+    # Initialize dictionary with all possible crop names
+    final_groups = {crop_name: [] for crop_name in CROP_CLASSES}
+    # Add a group for any failures
+    final_groups["Unknown"] = [] 
+
     with torch.no_grad():
-        for _, pil_image in image_batch:
-            inputs = processor(images=pil_image, return_tensors="pt").to(device)
-            outputs = model(**inputs)
-            feature = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
-            features.append(feature)
-    
-    if not features:
-        return {}
-
-    features_array = np.array(features)
-    
-    # Handle edge case: less images than clusters
-    if len(features_array) < num_clusters:
-        print(f"Warning: Only {len(features_array)} images, but {num_clusters} clusters requested. Placing all in 'Crop 1'.")
-        # Fallback: just put all images in "Crop 1" and ensure other keys exist
-        final_groups = {"Crop 1": image_batch}
-        for i in range(1, num_clusters):
-            final_groups[f"Crop {i + 1}"] = []
-        return final_groups
-
-    # Run KMeans
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
-    kmeans.fit(features_array)
-    labels = kmeans.labels_
-    
-    # Group images based on labels
-    crop_groups_by_label = defaultdict(list)
-    for i, label in enumerate(labels):
-        crop_groups_by_label[label].append(image_batch[i])
-        
-    # Map labels (0, 1, 2) to names ("Crop 1", "Crop 2", "Crop 3")
-    final_groups = {}
-    for i in range(num_clusters):
-        key_name = f"Crop {i + 1}"
-        final_groups[key_name] = crop_groups_by_label.get(i, []) # Get images for label i, or empty list
+        for (filename, pil_image) in image_batch:
+            try:
+                inputs = processor(images=pil_image, return_tensors="pt").to(device)
+                logits = model(inputs.pixel_values)
+                pred_index = logits.argmax().item()
+                crop_name = CROP_CLASSES[pred_index]
+                final_groups[crop_name].append((filename, pil_image))
             
-    print(f"KMeans Crop Results: " + ", ".join([f"C{i+1}={len(final_groups[f'Crop {i+1}'])}" for i in range(num_clusters)]))
+            except Exception as e:
+                print(f"Error classifying crop for image {filename}: {e}")
+                final_groups["Unknown"].append((filename, pil_image))
+
+    print(f"Crop Classification Results: " + ", ".join([f"{name}={len(group)}" for name, group in final_groups.items() if len(group) > 0]))
     return final_groups
 
+
+# =======================================================================
+# 4. HEALTH CLASSIFICATION (Unchanged)
+# =======================================================================
 
 def run_health_classification(crop_name, image_group, model, preprocess, device):
     """
     Classifies a batch of images as 'healthy' or 'unhealthy' using the passed CLIP model.
+    --- THIS FUNCTION IS UNCHANGED ---
     """
     if not image_group or model is None:
         return {"healthy": [], "unhealthy": []}
@@ -149,10 +222,15 @@ def run_health_classification(crop_name, image_group, model, preprocess, device)
     return health_results
 
 
+# =======================================================================
+# 5. DISEASE CLASSIFICATION (Unchanged - Kept KMeans as requested)
+# =======================================================================
+
 def run_disease_classification(crop_name, unhealthy_images, model, processor, device, num_clusters=3):
     """
-    Classifies unhealthy images into a fixed number of disease clusters using KMeans.
-    ALWAYS returns keys for 'Disease A', 'Disease B', and 'Disease C'.
+    Classifies unhealthy images into a fixed number of disease clusters 
+    using the BASE DINO model features and KMeans.
+    --- THIS FUNCTION IS UNCHANGED ---
     """
     if not unhealthy_images or model is None or processor is None:
         return {}
@@ -200,10 +278,18 @@ def run_disease_classification(crop_name, unhealthy_images, model, processor, de
     return final_disease_groups
 
 
+# =======================================================================
+# 6. MAIN PIPELINE ORCHESTRATOR (Unchanged)
+# =======================================================================
+
 def run_disease_pipeline_by_crop(crop_groups, 
                                  dino_model, dino_processor, dino_device, 
-                                 clip_model, clip_preprocess, clip_device,  
+                                 clip_model, clip_preprocess, clip_device, 
                                  global_bg_removed: bool = False):
+    """
+    This function is unchanged. It receives the BASE dino_model
+    and correctly passes it to run_disease_classification.
+    """
     try:
         final_sorting_results = {}
         

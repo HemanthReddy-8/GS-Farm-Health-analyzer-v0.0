@@ -15,14 +15,19 @@ from pipeline.pest_pipeline import (
     run_etl_calculation,
     run_pest_pipeline_by_crop
 )
+# --- MODIFIED IMPORTS ---
 from pipeline.disease_pipeline import (
-    load_dino_model,
+    load_dino_processor,         # <-- MODIFIED
+    load_base_dino_model,        # <-- MODIFIED
+    load_crop_classifier,        # <-- MODIFIED
     run_crop_classification,
-    # load_clip_classifier, <-- THIS IS REMOVED
+    # load_clip_classifier,
     run_health_classification,
     run_disease_classification,
     run_disease_pipeline_by_crop
 )
+# --- END MODIFIED IMPORTS ---
+
 # --- Import new pipeline files ---
 try:
     from pipeline import color_analysis
@@ -50,10 +55,10 @@ def run_pest_pipeline_wrapper(crop_groups, model):
     except Exception as e:
         return None, f"Error in Pest Pipeline: {e}"
 
-# --- MODIFIED: Wrapper now accepts the main CLIP model ---
+# --- This wrapper is unchanged and correct ---
 def run_disease_pipeline_wrapper(crop_groups, 
                                  dino_model, dino_processor, dino_device, 
-                                 clip_model, clip_preprocess, clip_device, # <-- Arguments changed
+                                 clip_model, clip_preprocess, clip_device,
                                  global_bg_removed):
     """Wrapper for the disease pipeline."""
     try:
@@ -63,7 +68,7 @@ def run_disease_pipeline_wrapper(crop_groups,
             dino_model, 
             dino_processor, 
             dino_device, 
-            clip_model, clip_preprocess, clip_device, # <-- Pass them here
+            clip_model, clip_preprocess, clip_device, 
             global_bg_removed
         )
         return disease_results
@@ -98,7 +103,6 @@ if 'image_batch_with_names' not in st.session_state:
     st.session_state.image_batch_with_names = []
 if 'processed_filenames' not in st.session_state:
     st.session_state.processed_filenames = []
-# --- THIS IS THE FIX ---
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0 
 # -----------------------------------------------------------------
@@ -130,7 +134,7 @@ uploaded_files = st.file_uploader(
     "Choose images...",
     type=['png', 'jpg', 'jpeg'],
     accept_multiple_files=True,
-    key=f"file_uploader_{st.session_state.uploader_key}" # <-- This now works
+    key=f"file_uploader_{st.session_state.uploader_key}"
 )
 
 # -----------------------------------------------------------------
@@ -145,7 +149,6 @@ global_bg_remove_enabled = st.sidebar.toggle(
     help="If ON, removes background from ALL images *after* Pest/Disease classification. If OFF, only color analysis removes BG."
 )
 
-# Add instructions or footer if needed
 st.sidebar.info("Upload multiple images and click 'Run Analysis'. Provide ETL parameters when prompted.")
 
 
@@ -170,7 +173,6 @@ if uploaded_files:
                 img = Image.open(uploaded_file)
                 temp_image_batch.append((uploaded_file.name, img.copy()))
         
-        # We now *only* load the original images into session state
         st.session_state.image_batch_with_names = temp_image_batch
         st.session_state.processed_filenames = current_filenames
     
@@ -190,19 +192,23 @@ if uploaded_files:
         st.session_state.etl_inputs_ready = False
         
         with st.spinner("Loading analysis models... (first time might take a while)"):
-            # Load all models
+            # --- MODIFIED MODEL LOADING ---
             pest_model = load_pest_model()
-            dino_model, dino_processor, dino_device = load_dino_model()
             
-            # --- THIS IS THE CHANGE ---
+            # Load all DINO components
+            dino_processor = load_dino_processor()
+            base_dino_model, base_dino_device = load_base_dino_model() # For disease clustering
+            crop_model, crop_device = load_crop_classifier()         # For crop classification
+            
             # Load ONE CLIP model for both tasks
             primary_clip_model, primary_preprocess, primary_device = load_primary_clip_model()
             
             # Load text prompts for the *primary* classifier
             pest_text_features, disease_text_features = get_primary_clip_features(primary_clip_model)
-            # --- END OF CHANGE ---
+            # --- END OF MODIFIED LOADING ---
 
-        if not all([pest_model, dino_model, primary_clip_model]): # <-- CHANGED
+        # --- MODIFIED MODEL CHECK ---
+        if not all([pest_model, dino_processor, base_dino_model, crop_model, primary_clip_model]):
             st.error("One or more models failed to load. Cannot proceed.")
         else:
             
@@ -212,7 +218,7 @@ if uploaded_files:
             # --- Step 1/5: Primary Classification ---
             with st.spinner("Step 1/5: Classifying Pest vs. Disease (on raw images)..."):
                 pest_image_batch, disease_image_batch = run_primary_classification(
-                    original_image_batch, # <--- Run on originals
+                    original_image_batch, 
                     primary_clip_model,
                     primary_preprocess,
                     pest_text_features,
@@ -277,11 +283,23 @@ if uploaded_files:
             
             # --- Step 3/5: DINO Crop Classification ---
             with st.spinner("Step 3/5: Classifying crops..."):
+                # --- MODIFIED: Use the fine-tuned CROP_MODEL ---
                 # Run DINO on the PEST batch (for the pest pipeline)
-                pest_crop_groups = run_crop_classification(pest_batch_for_pipeline, dino_model, dino_processor, dino_device)
+                pest_crop_groups = run_crop_classification(
+                    pest_batch_for_pipeline, 
+                    crop_model,          # <-- Use fine-tuned model
+                    dino_processor, 
+                    crop_device          # <-- Use its device
+                )
                 
                 # Run DINO on the COMBINED batch (for the disease pipeline)
-                all_images_crop_groups = run_crop_classification(all_images_for_pipeline, dino_model, dino_processor, dino_device)
+                all_images_crop_groups = run_crop_classification(
+                    all_images_for_pipeline, 
+                    crop_model,          # <-- Use fine-tuned model
+                    dino_processor, 
+                    crop_device          # <-- Use its device
+                )
+                # --- END MODIFIED ---
 
             # --- Step 4/5: Run Pipelines in Parallel ---
             with st.spinner("Step 4/5: Running Pest and Disease analysis..."):
@@ -290,20 +308,20 @@ if uploaded_files:
                     # Submit Pest pipeline with *only* pest crop groups
                     pest_future = executor.submit(run_pest_pipeline_wrapper, pest_crop_groups, pest_model)
                     
-                    # --- THIS IS THE CHANGE ---
+                    # --- MODIFIED: Pass the BASE DINO model to the disease pipeline ---
                     # Submit Disease pipeline with ALL crop groups
                     disease_future = executor.submit(
                         run_disease_pipeline_wrapper, 
-                        all_images_crop_groups, # <-- Pass the combined groups
-                        dino_model, 
-                        dino_processor, 
-                        dino_device, 
-                        primary_clip_model,  # <-- Pass the one CLIP model
-                        primary_preprocess,  # <-- Pass its processor
-                        primary_device,      # <-- Pass its device
-                        global_bg_remove_enabled # Pass flag for internal BG logic
+                        all_images_crop_groups,   # <-- Pass the combined groups
+                        base_dino_model,          # <-- Pass the BASE model
+                        dino_processor,           # <-- Pass the shared processor
+                        base_dino_device,         # <-- Pass the BASE model's device
+                        primary_clip_model,       # <-- Pass the one CLIP model
+                        primary_preprocess,       # <-- Pass its processor
+                        primary_device,           # <-- Pass its device
+                        global_bg_remove_enabled  # Pass flag for internal BG logic
                     )
-                    # --- END OF CHANGE ---
+                    # --- END OF MODIFIED CALL ---
                     
                     pest_result = pest_future.result()
                     disease_result = disease_future.result()
@@ -354,7 +372,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
     # --- NEW: Get all unique crop keys from BOTH pipelines ---
     pest_crops = set(st.session_state.pest_results_by_crop.keys())
     disease_crops = set(st.session_state.disease_results_by_crop.keys())
-    all_crop_names = sorted(list(pest_crops.union(disease_crops))) # e.g., ['Crop 1', 'Crop 2', 'Crop 3']
+    all_crop_names = sorted(list(pest_crops.union(disease_crops))) # e.g., ['tomato', 'sunflower', 'Unknown']
 
     # --- BRANCH 1: Display Pest & ETL ---
     with col1:
@@ -461,9 +479,9 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
 
                                     with st.expander("Additional Info"):
                                         st.image(cv2.cvtColor(item_data['bg_removed'], cv2.COLOR_BGR2RGB), 
-                                                caption="Background Removed", use_container_width=True)
+                                                 caption="Background Removed", use_container_width=True)
                                         st.image(item_data['individual_palette'], 
-                                                caption="Individual Color Graph", use_container_width=True)
+                                                 caption="Individual Color Graph", use_container_width=True)
                                         
                                         st.markdown("---")
                                         dl_col1, dl_col2, dl_col3 = st.columns(3)
@@ -516,9 +534,9 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
 
                                                 with st.expander("Additional Info"):
                                                     st.image(cv2.cvtColor(item_data['bg_removed'], cv2.COLOR_BGR2RGB), 
-                                                            caption="Background Removed", use_container_width=True)
+                                                             caption="Background Removed", use_container_width=True)
                                                     st.image(item_data['individual_palette'], 
-                                                            caption="Individual Color Graph", use_container_width=True)
+                                                             caption="Individual Color Graph", use_container_width=True)
                                                     
                                                     st.markdown("---")
                                                     dl_col1, dl_col2, dl_col3 = st.columns(3)
