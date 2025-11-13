@@ -378,7 +378,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
         if not all_crop_names:
             st.warning("Run analysis to see pest results.")
         else:
-            pest_crop_tabs = st.tabs([f"{crop}" for crop in all_crop_names])
+            pest_crop_tabs = st.tabs(all_crop_names)
 
             for i, crop_name in enumerate(all_crop_names):
                 with pest_crop_tabs[i]:
@@ -428,7 +428,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
         if not all_crop_names:
             st.warning("Run analysis to see disease results.")
         else:
-            disease_crop_tabs = st.tabs([f"{crop}" for crop in all_crop_names])
+            disease_crop_tabs = st.tabs(all_crop_names)
             
             for i, crop_name in enumerate(all_crop_names):
                 with disease_crop_tabs[i]:
