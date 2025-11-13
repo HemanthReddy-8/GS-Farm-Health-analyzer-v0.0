@@ -37,6 +37,7 @@ def get_primary_clip_features(_model): # Pass model to link cache
         "a leaf attacked by pests or insects"
     ]
     disease_prompts = [
+        "a leaf that is healthy"
         "a diseased leaf without any insects",
         "a leaf infected by fungus or bacteria but no visible pests",
         "a leaf with curling or yellowing due to disease, not insects",
