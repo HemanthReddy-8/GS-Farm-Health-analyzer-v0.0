@@ -112,7 +112,7 @@ def load_crop_classifier():
         model = CustomDinoClassifier(num_classes=len(CROP_CLASSES))
         
         # 2. Load the weights dictionary (contains ONLY fc1 and classifier)
-        weights_dict = torch.load(weights_path, map_location=device)
+        weights_dict = torch.load(weights_path, map_location=device,weights_only=False)
         
         # --- START OF THE FIX ---
         # 3. Load the weights into the model.
