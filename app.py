@@ -8,18 +8,18 @@ import concurrent.futures
 import io 
 from collections import defaultdict 
 
-# Import all the functions from backend pipeline files
+
 from pipeline.pest_pipeline import (
     load_pest_model,
     run_pest_detection_batch,
     run_etl_calculation,
     run_pest_pipeline_by_crop
 )
-# --- MODIFIED IMPORTS ---
+
 from pipeline.disease_pipeline import (
-    load_dino_processor,         # <-- MODIFIED
-    load_base_dino_model,        # <-- MODIFIED
-    load_crop_classifier,        # <-- MODIFIED
+    load_dino_processor,       
+    load_base_dino_model,        
+    load_crop_classifier,        
     run_crop_classification,
     # load_clip_classifier,
     run_health_classification,
@@ -28,12 +28,12 @@ from pipeline.disease_pipeline import (
 )
 # --- END MODIFIED IMPORTS ---
 
-# --- Import new pipeline files ---
+
 try:
     from pipeline import color_analysis
     from pipeline import bg_remover 
     
-    # --- NEW: Import the primary classifier functions ---
+    # Import the primary classifier functions
     from pipeline.primary_classifier import (
         load_primary_clip_model,
         get_primary_clip_features,
@@ -43,19 +43,18 @@ except ImportError:
     st.error("Could not import pipeline modules. Please ensure 'primary_classifier.py' exists.")
     pass # Will be handled by the main app logic
 
-# -----------------------------------------------------------------
-# --- Worker Functions (Now just wrappers) ---
-# -----------------------------------------------------------------
+
+# Worker Functions
 
 def run_pest_pipeline_wrapper(crop_groups, model):
-    """Wrapper for the pest pipeline."""
+    
     try:
         pest_results, etl_counts = run_pest_pipeline_by_crop(crop_groups, model)
         return pest_results, etl_counts
     except Exception as e:
         return None, f"Error in Pest Pipeline: {e}"
 
-# --- This wrapper is unchanged and correct ---
+
 def run_disease_pipeline_wrapper(crop_groups, 
                                  dino_model, dino_processor, dino_device, 
                                  clip_model, clip_preprocess, clip_device,
@@ -77,7 +76,7 @@ def run_disease_pipeline_wrapper(crop_groups,
 
 
 def reset_app():
-    # Clear all result/data keys
+    
     st.session_state.pest_results_by_crop = {}
     st.session_state.disease_results_by_crop = {}
     st.session_state.total_pest_counts_for_etl = {}
@@ -85,12 +84,11 @@ def reset_app():
     st.session_state.image_batch_with_names = []
     st.session_state.processed_filenames = []
     
-    # Increment the key to force the file_uploader to re-render
+    
     st.session_state.uploader_key += 1
 
-# -----------------------------------------------------------------
-# --- MOVED: Initialize Session State (MUST BE AT THE TOP) ---
-# -----------------------------------------------------------------
+
+# Initialize Session State
 if 'pest_results_by_crop' not in st.session_state:
     st.session_state.pest_results_by_crop = {}
 if 'disease_results_by_crop' not in st.session_state:
@@ -105,11 +103,11 @@ if 'processed_filenames' not in st.session_state:
     st.session_state.processed_filenames = []
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0 
-# -----------------------------------------------------------------
 
-# -----------------------------------------------------------------
+
+# 
 # Streamlit App Configuration
-# -----------------------------------------------------------------
+
 st.set_page_config(layout="wide", page_title="AGS Farmhealth analyser Tool")
 
 col1, col2 = st.columns([1, 6]) 
@@ -137,9 +135,8 @@ uploaded_files = st.file_uploader(
     key=f"file_uploader_{st.session_state.uploader_key}"
 )
 
-# -----------------------------------------------------------------
-# --- NEW: Sidebar Controls ---
-# -----------------------------------------------------------------
+
+#Sidebar Controls
 st.sidebar.button("Clear All & Reset App", on_click=reset_app, use_container_width=True, type="secondary")
 st.sidebar.divider()
 st.sidebar.subheader("Processing Options")
@@ -152,9 +149,9 @@ global_bg_remove_enabled = st.sidebar.toggle(
 st.sidebar.info("Upload multiple images and click 'Run Analysis'. Provide ETL parameters when prompted.")
 
 
-# -----------------------------------------------------------------
+
 # Main Processing Logic
-# -----------------------------------------------------------------
+
 
 if uploaded_files:
     
@@ -192,7 +189,7 @@ if uploaded_files:
         st.session_state.etl_inputs_ready = False
         
         with st.spinner("Loading analysis models... (first time might take a while)"):
-            # --- MODIFIED MODEL LOADING ---
+            
             pest_model = load_pest_model()
             
             # Load all DINO components
@@ -205,9 +202,9 @@ if uploaded_files:
             
             # Load text prompts for the *primary* classifier
             pest_text_features, disease_text_features = get_primary_clip_features(primary_clip_model)
-            # --- END OF MODIFIED LOADING ---
+            
 
-        # --- MODIFIED MODEL CHECK ---
+        
         if not all([pest_model, dino_processor, base_dino_model, crop_model, primary_clip_model]):
             st.error("One or more models failed to load. Cannot proceed.")
         else:
@@ -249,10 +246,10 @@ if uploaded_files:
                                 processed_pest_batch.append((fname, processed_img))
                             else:
                                 st.warning(f"BG removal failed for {fname} (pest). Using original.")
-                                processed_pest_batch.append((fname, img.convert("RGBA"))) # Fallback
+                                processed_pest_batch.append((fname, img.convert("RGBA")))
                         except Exception as e:
                             st.error(f"Error during BG removal on {fname} (pest): {e}. Using original.")
-                            processed_pest_batch.append((fname, img.convert("RGBA"))) # Fallback
+                            processed_pest_batch.append((fname, img.convert("RGBA"))) 
                 
                 # Process the DISEASE batch
                 processed_disease_batch = []
@@ -281,47 +278,47 @@ if uploaded_files:
             # Create a combined batch for the disease pipeline
             all_images_for_pipeline = pest_batch_for_pipeline + disease_batch_for_pipeline
             
-            # --- Step 3/5: DINO Crop Classification ---
+            # Step 3/5: DINO Crop Classification
             with st.spinner("Step 3/5: Classifying crops..."):
-                # --- MODIFIED: Use the fine-tuned CROP_MODEL ---
-                # Run DINO on the PEST batch (for the pest pipeline)
+                #
+                # Run DINO on the PEST batch
                 pest_crop_groups = run_crop_classification(
                     pest_batch_for_pipeline, 
-                    crop_model,          # <-- Use fine-tuned model
+                    crop_model,          
                     dino_processor, 
-                    crop_device          # <-- Use its device
+                    crop_device          
                 )
                 
                 # Run DINO on the COMBINED batch (for the disease pipeline)
                 all_images_crop_groups = run_crop_classification(
                     all_images_for_pipeline, 
-                    crop_model,          # <-- Use fine-tuned model
+                    crop_model,          
                     dino_processor, 
-                    crop_device          # <-- Use its device
+                    crop_device          
                 )
-                # --- END MODIFIED ---
+                
 
-            # --- Step 4/5: Run Pipelines in Parallel ---
+            # Step 4/5: Run Pipelines in Parallel
             with st.spinner("Step 4/5: Running Pest and Disease analysis..."):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     
                     # Submit Pest pipeline with *only* pest crop groups
                     pest_future = executor.submit(run_pest_pipeline_wrapper, pest_crop_groups, pest_model)
                     
-                    # --- MODIFIED: Pass the BASE DINO model to the disease pipeline ---
+                    
                     # Submit Disease pipeline with ALL crop groups
                     disease_future = executor.submit(
                         run_disease_pipeline_wrapper, 
-                        all_images_crop_groups,   # <-- Pass the combined groups
-                        base_dino_model,          # <-- Pass the BASE model
-                        dino_processor,           # <-- Pass the shared processor
-                        base_dino_device,         # <-- Pass the BASE model's device
-                        primary_clip_model,       # <-- Pass the one CLIP model
-                        primary_preprocess,       # <-- Pass its processor
-                        primary_device,           # <-- Pass its device
-                        global_bg_remove_enabled  # Pass flag for internal BG logic
+                        all_images_crop_groups,   
+                        base_dino_model,          
+                        dino_processor,           
+                        base_dino_device,        
+                        primary_clip_model,       
+                        primary_preprocess,       
+                        primary_device,           
+                        global_bg_remove_enabled  
                     )
-                    # --- END OF MODIFIED CALL ---
+                    
                     
                     pest_result = pest_future.result()
                     disease_result = disease_future.result()
@@ -360,21 +357,20 @@ elif not uploaded_files and st.session_state.processed_filenames:
     st.session_state.processed_filenames = []
     st.rerun()
 
-# -----------------------------------------------------------------
-# --- DISPLAY LOGIC (RUNS EVERY TIME) ---
-# -----------------------------------------------------------------
 
-# --- MODIFIED DISPLAY LOGIC ---
+#DISPLAY LOGIC
+
+
 if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_crop:
     
     col1, col2 = st.columns(2)
     
-    # --- NEW: Get all unique crop keys from BOTH pipelines ---
+    # Get all unique crop keys from BOTH pipelines
     pest_crops = set(st.session_state.pest_results_by_crop.keys())
     disease_crops = set(st.session_state.disease_results_by_crop.keys())
-    all_crop_names = sorted(list(pest_crops.union(disease_crops))) # e.g., ['tomato', 'sunflower', 'Unknown']
+    all_crop_names = sorted(list(pest_crops.union(disease_crops))) 
 
-    # --- BRANCH 1: Display Pest & ETL ---
+    # BRANCH 1: Display Pest & ETL
     with col1:
         st.header("🐜 Pest & ETL Analysis")
         pest_results_data = st.session_state.pest_results_by_crop
@@ -382,7 +378,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
         if not all_crop_names:
             st.warning("Run analysis to see pest results.")
         else:
-            pest_crop_tabs = st.tabs([f"{crop} (Pests)" for crop in all_crop_names])
+            pest_crop_tabs = st.tabs([f"{crop}" for crop in all_crop_names])
 
             for i, crop_name in enumerate(all_crop_names):
                 with pest_crop_tabs[i]:
@@ -424,7 +420,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
                                             key=f"pest_dl_{crop_name}_{pest_name}_{idx}"
                                         )
 
-    # --- BRANCH 2: Display Crop & Disease ---
+    # BRANCH 2: Display Crop & Disease
     with col2:
         st.header("🌿 Crop & Disease Analysis")
         disease_results_data = st.session_state.disease_results_by_crop
@@ -432,7 +428,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
         if not all_crop_names:
             st.warning("Run analysis to see disease results.")
         else:
-            disease_crop_tabs = st.tabs([f"{crop} (Diseases)" for crop in all_crop_names])
+            disease_crop_tabs = st.tabs([f"{crop}" for crop in all_crop_names])
             
             for i, crop_name in enumerate(all_crop_names):
                 with disease_crop_tabs[i]:
@@ -456,7 +452,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
                     
                     health_tabs = st.tabs([f"HEALTHY ({healthy_count})", f"UNHEALTHY ({unhealthy_count})"])
                     
-                    # --- HEALTHY TAB (GRID + EXPANDER) ---
+                    # HEALTHY TAB (GRID + EXPANDER)
                     with health_tabs[0]: 
                         if not healthy_image_data:
                             st.write("No healthy images found for this crop.")
@@ -504,7 +500,7 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
                                 st.subheader("Aggregated Color Palette (All Healthy)")
                                 st.image(healthy_aggregated_palette, use_container_width=True)
                     
-                    # --- UNHEALTHY TAB (GRID + EXPANDER) ---
+                    # UNHEALTHY TAB (GRID + EXPANDER)
                     with health_tabs[1]: 
                         if not unhealthy_groups:
                             st.write("No unhealthy images found for this crop.")
@@ -562,10 +558,10 @@ if st.session_state.pest_results_by_crop or st.session_state.disease_results_by_
                                     else:
                                         st.write(f"No images found for {disease_name}.")
 
-# --- ETL Input Form (Unchanged) ---
+# ETL Input Form
 if st.session_state.get('etl_inputs_ready', False):
     st.markdown("---")
-    st.header("⚙️ Enter ETL Calculation Parameters")
+    st.header("Enter ETL Calculation Parameters")
     st.warning("Provide initial damage index (I), control cost (C), market price, and environmental factor (fev_con) for each detected pest.")
     
     pest_counts = st.session_state.total_pest_counts_for_etl
@@ -589,7 +585,7 @@ if st.session_state.get('etl_inputs_ready', False):
             else:
                 st.info("Calculating ETL based on provided parameters...")
                 df_etl, df_progress, etl_fig = run_etl_calculation(etl_input_rows)
-                st.header("📊 ETL Calculation Results")
+                st.header("ETL Calculation Results")
                 if df_etl.empty and df_progress.empty:
                     st.warning("ETL calculation did not produce results.")
                 else:

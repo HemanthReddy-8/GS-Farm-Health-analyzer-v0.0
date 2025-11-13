@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import clip 
 
-# --- Import your new BG remover function ---
+
 try:
     from pipeline.bg_remover import remove_bg_from_pil_and_get_bgr
 except ImportError:
@@ -18,12 +18,12 @@ except ImportError:
     def remove_bg_from_pil_and_get_bgr(pil_image):
         return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
-# --- Import your new color analysis function ---
+
 try:
     from pipeline.color_analysis import run_batch_color_analysis, generate_individual_color_graph
 except ImportError:
     st.error("Could not import color_analysis.py.")
-    # Create a dummy function to prevent crashes
+    
     def run_batch_color_analysis(image_group):
         palette = np.zeros((256, 512, 3), dtype=np.uint8)
         cv2.putText(palette, "Batch Color Analysis Failed", (30, 128), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
@@ -33,26 +33,21 @@ except ImportError:
         cv2.putText(palette, "Individual Color Analysis Failed", (30, 128), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
         return cv2.cvtColor(palette, cv2.COLOR_BGR2RGB)
 
-# =======================================================================
-# 1. NEW: CLASS DEFINITIONS (Added)
-# =======================================================================
 
-# Make sure the order matches your training!
-CROP_CLASSES = ["tomato", "sunflower", "potato", "okra"]
+# 1.CLASS DEFINITIONS
+
+CROP_CLASSES = ["okra","potato","sunflower", "tomato"]
 
 class CustomDinoClassifier(nn.Module):
-    """
-    Blueprint for the fine-tuned 4-class CROP classifier.
-    This version includes the intermediate 'fc1' layer.
-    """
+    
     def __init__(self, num_classes=4):
         super(CustomDinoClassifier, self).__init__()
         # 1. The DINO backbone (loads pre-trained weights)
         self.dino = AutoModel.from_pretrained("facebook/dinov2-small")
         
-        # 2. The classification head (matches your .pth file)
-        self.fc1 = nn.Linear(384, 512) # DINO output (384) -> Intermediate (512)
-        self.classifier = nn.Linear(512, num_classes) # Intermediate (512) -> Output (4)
+        # 2. The classification head
+        self.fc1 = nn.Linear(384, 512) 
+        self.classifier = nn.Linear(512, num_classes) 
         self.relu = nn.ReLU()
 
     def forward(self, pixel_values):
@@ -65,15 +60,13 @@ class CustomDinoClassifier(nn.Module):
         logits = self.classifier(x)
         return logits
 
-# =======================================================================
-# 2. NEW: MODEL LOADING FUNCTIONS (Replaced old load_dino_model)
-# =======================================================================
+
+# 2. MODEL LOADING FUNCTIONS
+
 
 @st.cache_resource
 def load_dino_processor():
-    """
-    Loads and caches the SHARED DINOv2 image processor.
-    """
+    
     try:
         processor = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
         print("[INFO] DINOv2 processor loaded successfully.")
@@ -84,9 +77,7 @@ def load_dino_processor():
 
 @st.cache_resource
 def load_base_dino_model():
-    """
-    Loads the RAW DINOv2 model (for disease clustering).
-    """
+    
     try:
         model = AutoModel.from_pretrained("facebook/dinov2-small")
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -101,28 +92,22 @@ def load_base_dino_model():
 
 @st.cache_resource
 def load_crop_classifier():
-    """
-    Loads the FINE-TUNED 4-class CROP classifier.
-    """
+    
     try:
         weights_path = "models/best_head_weights.pth"
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # 1. Instantiate the *correct* model structure
+        
         model = CustomDinoClassifier(num_classes=len(CROP_CLASSES))
         
-        # 2. Load the weights dictionary (contains ONLY fc1 and classifier)
+        # 2. Load the weights dictionary
         weights_dict = torch.load(weights_path, map_location=device,weights_only=False)
         
-        # --- START OF THE FIX ---
-        # 3. Load the weights into the model.
-        # strict=False tells PyTorch to NOT error out if keys are missing.
-        # This will load 'fc1.weight', 'classifier.weight', etc.
-        # and happily ignore that 'dino.embeddings.cls_token' is missing.
-        model.load_state_dict(weights_dict, strict=False) 
-        # --- END OF THE FIX ---
         
-        # 4. Send to device and set to eval mode
+        model.load_state_dict(weights_dict, strict=False) 
+        
+        
+        # Send to device and set to eval mode
         model.to(device)
         model.eval()
         
@@ -132,21 +117,17 @@ def load_crop_classifier():
     except Exception as e:
         print(f"Error loading CROP classifier: {e}")
         return None, None
-# =======================================================================
-# 3. CROP CLASSIFICATION (Replaced KMeans with Supervised Model)
-# =======================================================================
+
+# 3. CROP CLASSIFICATION
 
 def run_crop_classification(image_batch, model, processor, device):
-    """
-    Classifies images into named crop clusters using the fine-tuned
-    4-class DINO model.
-    """
+    
     if not image_batch or model is None or processor is None:
         return {}
     
-    # Initialize dictionary with all possible crop names
+    
     final_groups = {crop_name: [] for crop_name in CROP_CLASSES}
-    # Add a group for any failures
+    
     final_groups["Unknown"] = [] 
 
     with torch.no_grad():
@@ -166,19 +147,15 @@ def run_crop_classification(image_batch, model, processor, device):
     return final_groups
 
 
-# =======================================================================
-# 4. HEALTH CLASSIFICATION (Unchanged)
-# =======================================================================
+
+# 4. HEALTH CLASSIFICATION
 
 def run_health_classification(crop_name, image_group, model, preprocess, device):
-    """
-    Classifies a batch of images as 'healthy' or 'unhealthy' using the passed CLIP model.
-    --- THIS FUNCTION IS UNCHANGED ---
-    """
+    
     if not image_group or model is None:
         return {"healthy": [], "unhealthy": []}
     
-    # --- Define new prompts for this classifier ---
+    
     candidate_labels = [
         "a photo of a healthy plant leaf",
         "a photo of a sick plant leaf with disease, spots, or damage"
@@ -193,8 +170,7 @@ def run_health_classification(crop_name, image_group, model, preprocess, device)
     
     for filename, pil_image in image_group:
         
-        # --- Preprocess the image ---
-        # Ensure image is 3-channel RGB for CLIP
+        
         if pil_image.mode == "RGBA":
             white_bg = Image.new("RGB", pil_image.size, (255, 255, 255))
             white_bg.paste(pil_image, (0, 0), pil_image)
@@ -204,12 +180,12 @@ def run_health_classification(crop_name, image_group, model, preprocess, device)
         
         processed_image = preprocess(image_rgb).unsqueeze(0).to(device)
         
-        # --- Score the image ---
+        
         with torch.no_grad():
             image_features = model.encode_image(processed_image)
             image_features /= image_features.norm(dim=-1, keepdim=True)
             
-            # Compare image to "healthy" and "unhealthy" prompts
+            
             scores = (image_features @ health_text_features.T).softmax(dim=-1)
             healthy_score = scores[0][0].item()
             unhealthy_score = scores[0][1].item()
@@ -222,16 +198,12 @@ def run_health_classification(crop_name, image_group, model, preprocess, device)
     return health_results
 
 
-# =======================================================================
-# 5. DISEASE CLASSIFICATION (Unchanged - Kept KMeans as requested)
-# =======================================================================
+
+# 5. DISEASE CLASSIFICATION
+
 
 def run_disease_classification(crop_name, unhealthy_images, model, processor, device, num_clusters=3):
-    """
-    Classifies unhealthy images into a fixed number of disease clusters 
-    using the BASE DINO model features and KMeans.
-    --- THIS FUNCTION IS UNCHANGED ---
-    """
+    
     if not unhealthy_images or model is None or processor is None:
         return {}
 
@@ -278,37 +250,33 @@ def run_disease_classification(crop_name, unhealthy_images, model, processor, de
     return final_disease_groups
 
 
-# =======================================================================
-# 6. MAIN PIPELINE ORCHESTRATOR (Unchanged)
-# =======================================================================
+
+# 6. MAIN PIPELINE ORCHESTRATOR
 
 def run_disease_pipeline_by_crop(crop_groups, 
                                  dino_model, dino_processor, dino_device, 
                                  clip_model, clip_preprocess, clip_device, 
                                  global_bg_removed: bool = False):
-    """
-    This function is unchanged. It receives the BASE dino_model
-    and correctly passes it to run_disease_classification.
-    """
+    
     try:
         final_sorting_results = {}
         
         for crop_name, image_group in crop_groups.items():
             if not image_group: 
                 final_sorting_results[crop_name] = {
-                    "healthy": ([], None), # (image_data_list, aggregated_palette)
+                    "healthy": ([], None), 
                     "unhealthy_by_disease": {}
                 }
                 continue
             
-            # --- THIS FUNCTION CALL IS MODIFIED ---
+            
             # 1. Health/Disease Sorting
             health_results = run_health_classification(
                 crop_name, 
                 image_group, 
-                clip_model,      # <-- Pass the model
-                clip_preprocess, # <-- Pass the preprocess
-                clip_device      # <-- Pass the device
+                clip_model,      
+                clip_preprocess, 
+                clip_device      
             )
             healthy_images = health_results["healthy"]
             unhealthy_images = health_results["unhealthy"]
@@ -316,7 +284,7 @@ def run_disease_pipeline_by_crop(crop_groups,
             # 2. Process HEALTHY images
             healthy_aggregated_palette = None
             healthy_image_data = [] 
-            all_healthy_bg_removed_bgr = [] # For aggregated palette
+            all_healthy_bg_removed_bgr = [] 
 
             if healthy_images:
                 for fname, img_pil in healthy_images:
