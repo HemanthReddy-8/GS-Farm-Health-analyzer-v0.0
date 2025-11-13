@@ -36,7 +36,7 @@ except ImportError:
 
 # 1.CLASS DEFINITIONS
 
-CROP_CLASSES = ["okra","sunflower","potato", "tomato"]
+CROP_CLASSES = ["okra","potato","sunflower", "tomato"]
 
 class CustomDinoClassifier(nn.Module):
     
