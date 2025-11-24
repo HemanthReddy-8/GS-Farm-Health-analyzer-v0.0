@@ -276,7 +276,7 @@ if uploaded_files:
                 disease_batch_for_pipeline = processed_disease_batch
             
             # Create a combined batch for the disease pipeline
-            all_images_for_pipeline = pest_batch_for_pipeline + disease_batch_for_pipeline
+            all_images_for_pipeline = disease_batch_for_pipeline
             
             # Step 3/5: DINO Crop Classification
             with st.spinner("Step 3/5: Classifying crops..."):
@@ -573,7 +573,7 @@ if st.session_state.get('etl_inputs_ready', False):
             cols = st.columns(4)
             i_old = cols[0].number_input(f"Initial Damage Index (I) for {pest_name}", min_value=0.0, value=0.1, step=0.01, format="%.3f", key=f"i_{pest_name}")
             c_cost = cols[1].number_input(f"Control Cost (C) for {pest_name}", min_value=0.0, value=10.0, step=0.5, format="%.2f", key=f"c_{pest_name}")
-            market_price = cols[2].number_input(f"Market Price/kg for {pest_name}", min_value=0.0, value=5.0, step=0.1, format="%.2f", key=f"mkt_{pest_name}")
+            market_price = cols[2].number_input(f"Market Price/kg for potato", min_value=0.0, value=5.0, step=0.1, format="%.2f", key=f"mkt_{pest_name}")
             fev_con = cols[3].number_input(f"Environmental Factor (fev_con) for {pest_name}", min_value=0.0, value=20.0, step=0.5, format="%.1f", key=f"fev_{pest_name}")
             etl_input_rows.append((pest_name, n_count, i_old, 0, c_cost, market_price, 0, 0, fev_con))
         
